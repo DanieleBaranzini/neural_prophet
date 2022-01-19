@@ -7,7 +7,7 @@ import inspect
 import torch
 import math
 
-from neuralprophet import utils_torch
+from neuralprophet import utils_torch, utils
 
 log = logging.getLogger("NP.config")
 
@@ -49,7 +49,7 @@ class Train:
                 raise NotImplementedError("Loss function {} name not defined".format(self.loss_func))
         elif callable(self.loss_func):
             pass
-        elif hasattr(torch.nn.modules.loss, self.loss_func.__class__.__name__):
+        elif issubclass(self.loss_func.__class__, torch.nn.modules.loss._Loss):
             pass
         else:
             raise NotImplementedError("Loss function {} not found".format(self.loss_func))
@@ -129,19 +129,24 @@ class Train:
         if reg_progress <= 0:
             delay_weight = 0
         elif reg_progress < 1:
-            delay_weight = 1 - (1 + np.cos(np.pi * reg_progress)) / 2.0
+            delay_weight = 1 - (1 + np.cos(np.pi * float(reg_progress))) / 2.0
         else:
             delay_weight = 1
         return delay_weight
 
-    def find_learning_rate(self, model, dataset, min_lr=1e-4, max_lr=10):
-        learning_rate = utils_torch.lr_range_test(
-            model,
-            dataset,
-            batch_size=self.batch_size,
-            loss_func=self.loss_func,
-            optimizer=self.optimizer,
-        )
+    def find_learning_rate(self, model, dataset, repeat: int = 3):
+        lrs = []
+        for i in range(repeat):
+            lr = utils_torch.lr_range_test(
+                model,
+                dataset,
+                loss_func=self.loss_func,
+                optimizer=self.optimizer,
+                batch_size=self.batch_size,
+            )
+            lrs.append(lr)
+        lrs_log10_mean = sum([np.log10(x) for x in lrs]) / repeat
+        learning_rate = 10 ** lrs_log10_mean
         return learning_rate
 
 
@@ -185,7 +190,7 @@ class Trend:
         if self.trend_reg > 0:
             if self.n_changepoints > 0:
                 log.info("Note: Trend changepoint regularization is experimental.")
-                self.trend_reg = 0.01 * self.trend_reg
+                self.trend_reg = 0.001 * self.trend_reg
             else:
                 log.info("Trend reg lambda ignored due to no changepoints.")
                 self.trend_reg = 0
@@ -237,7 +242,7 @@ class AR:
     def __post_init__(self):
         if self.ar_sparsity is not None and self.ar_sparsity < 1:
             assert self.ar_sparsity > 0
-            self.reg_lambda = 0.01 * (1.0 / (1e-6 + self.ar_sparsity) - 1.00)
+            self.reg_lambda = 0.001 * (1.0 / (1e-6 + self.ar_sparsity) - 1.00)
         else:
             self.reg_lambda = None
 
@@ -265,3 +270,31 @@ class Covar:
         if self.reg_lambda is not None:
             if self.reg_lambda < 0:
                 raise ValueError("regularization must be >= 0")
+
+
+@dataclass
+class Regressor:
+    reg_lambda: float
+    normalize: str
+    mode: str
+
+
+@dataclass
+class Event:
+    lower_window: int
+    upper_window: int
+    reg_lambda: float
+    mode: str
+
+
+@dataclass
+class Holidays:
+    country: str
+    lower_window: int
+    upper_window: int
+    mode: str = "additive"
+    reg_lambda: float = None
+    holiday_names: set = field(init=False)
+
+    def init_holidays(self, df=None):
+        self.holiday_names = utils.get_holidays_from_country(self.country, df)
